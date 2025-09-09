@@ -6,16 +6,10 @@ Provides tools to query Supabase database using natural language
 
 import json
 import re
-from typing import Optional
 from fastmcp import FastMCP
-from langchain_community.utilities import SQLDatabase
 import psycopg2
 from psycopg2.extras import RealDictCursor
-import os
 
-# Supabase configuration (hardcoded Session/Transaction Pooler as requested)
-# Note: Transaction pooler (port 6543) does not support PREPARE statements.
-# Replace PASSWORD with your actual password.
 
 SUPABASE_DB_USER = "postgres.hbfmvzzjbvqzmwpxnrcb"
 SUPABASE_DB_PASSWORD = "Suryansh@1440"
@@ -36,12 +30,11 @@ def _get_connection_params() -> dict:
     }
 
 # Global database connection
-db: Optional[SQLDatabase] = None
 postgres_conn = None
 
 def connect_database() -> None:
     """Initialize database connection to Supabase PostgreSQL."""
-    global db, postgres_conn
+    global postgres_conn
     try:
         # Connect to Supabase PostgreSQL
         params = _get_connection_params()
@@ -77,126 +70,119 @@ def connect_database() -> None:
 # Initialize MCP server
 mcp = FastMCP("Supabase Database Server")
 
-def _process_reserved_keywords(sql_query: str) -> str:
-    """
-    Process SQL query to handle PostgreSQL reserved keywords by adding quotes.
-    Also handles malformed quotes that might occur during MCP communication.
-    """
-    # List of common PostgreSQL reserved keywords that might be table names
-    reserved_keywords = [
-        'user', 'order', 'group', 'select', 'from', 'where', 'table', 'index',
-        'view', 'schema', 'database', 'column', 'constraint', 'trigger', 'function',
-        'procedure', 'sequence', 'type', 'domain', 'rule', 'default', 'check',
-        'foreign', 'primary', 'unique', 'references', 'cascade', 'restrict',
-        'grant', 'revoke', 'privilege', 'role', 'user', 'public', 'private'
-    ]
-    
-    import re
-    
-    # First, fix any malformed quotes (like "user instead of "user")
-    # Pattern to match malformed quotes: "table_name without closing quote
-    malformed_quote_pattern = r'"([a-zA-Z_][a-zA-Z0-9_]*)(?![a-zA-Z0-9_"])(?=\s|$)'
-    def fix_malformed_quotes(match):
-        table_name = match.group(1)
-        return f'"{table_name}"'
-    
-    processed_query = re.sub(malformed_quote_pattern, fix_malformed_quotes, sql_query)
-    
-    # Then, add quotes to unquoted reserved keywords
-    # Pattern to match FROM table_name (case insensitive)
-    from_pattern = r'\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)\b'
-    
-    def quote_table_name(match):
-        table_name = match.group(1).lower()
-        if table_name in reserved_keywords:
-            return f'FROM "{table_name}"'
-        return match.group(0)
-    
-    processed_query = re.sub(from_pattern, quote_table_name, processed_query, flags=re.IGNORECASE)
-    
-    return processed_query
 
-@mcp.tool
-async def execute_sql(sql_query: str) -> str:
-    """
-    Execute a SELECT SQL query on the database. Only SELECT queries are allowed for security.
-    
-    Input: sql_query (string) - The SELECT SQL query to execute (e.g., "SELECT * FROM users", "SELECT name, age FROM users WHERE age > 25")
-        
-    Returns:
-        str: Query results
-    """
-    try:
-        if postgres_conn is None:
-            return "Database not connected. Please connect first."
-        
-        # Security check: Only allow SELECT queries
-        sql_query_upper = sql_query.strip().upper()
-        if not sql_query_upper.startswith('SELECT'):
-            return f"Error: Only SELECT queries are allowed for security. Your query '{sql_query}' is not permitted."
-        
-        # Additional security checks for dangerous keywords
-        dangerous_keywords = ['DROP', 'DELETE', 'INSERT', 'UPDATE', 'ALTER', 'CREATE', 'TRUNCATE', 'EXEC', 'EXECUTE']
-        for keyword in dangerous_keywords:
-            if keyword in sql_query_upper:
-                return f"Error: The keyword '{keyword}' is not allowed for security reasons. Only SELECT queries are permitted."
-        
-        # Process the query to handle reserved keywords
-        processed_query = _process_reserved_keywords(sql_query)
-        
-        # Execute the SQL query using PostgreSQL
-        cursor = postgres_conn.cursor(cursor_factory=RealDictCursor)
-        try:
-            tried_notes = []
-            cursor.execute(processed_query)
-            
-            # Format the response
-            response_text = f"SQL Query: {sql_query}\n\n"
-            
-            try:
-                rows = cursor.fetchall()
-                if rows:
-                    # Convert RealDictRow to regular dict for JSON serialization
-                    # Handle datetime objects by converting them to strings
-                    rows_data = []
-                    for row in rows:
-                        row_dict = {}
-                        for key, value in dict(row).items():
-                            if hasattr(value, 'isoformat'):  # datetime objects
-                                row_dict[key] = value.isoformat()
-                            else:
-                                row_dict[key] = value
-                        rows_data.append(row_dict)
-                    response_text += f"Results:\n{json.dumps(rows_data, indent=2)}"
-                else:
-                    response_text += "Query executed successfully (no rows returned)"
-            except Exception as e:
-                response_text += f"Error fetching results: {str(e)}"
-            
-            # Commit the transaction
-            postgres_conn.commit()
-            if tried_notes:
-                response_text += "\n\n/* tried: " + "; ".join(tried_notes) + " */"
-            return response_text
-            
-        except Exception as e:
-            postgres_conn.rollback()
-            raise e
-        finally:
-            cursor.close()
-        
-    except Exception as e:
-        return f"Error executing SQL query: {str(e)}"
+
+# functions help to fetch tables, columns, primary keys, relationships, and small samples.
+def _fetch_tables(cursor):
+    cursor.execute(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_type = 'BASE TABLE'
+        ORDER BY table_name
+        """
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+def _fetch_columns_for_tables(cursor, tables):
+    if not tables:
+        return {}
+    cursor.execute(
+        """
+        SELECT c.table_name,
+               c.column_name,
+               c.data_type,
+               c.is_nullable,
+               c.column_default,
+               c.character_maximum_length,
+               c.ordinal_position
+        FROM information_schema.columns c
+        WHERE c.table_schema = 'public'
+          AND c.table_name = ANY(%s)
+        ORDER BY c.table_name, c.ordinal_position
+        """,
+        (tables,)
+    )
+    result = {}
+    for (
+        table_name,
+        column_name,
+        data_type,
+        is_nullable,
+        column_default,
+        character_maximum_length,
+        ordinal_position,
+    ) in cursor.fetchall():
+        cols = result.setdefault(table_name, [])
+        max_length = f"({character_maximum_length})" if character_maximum_length else ""
+        nullable = "NULL" if is_nullable == 'YES' else "NOT NULL"
+        default = f" DEFAULT {column_default}" if column_default else ""
+        cols.append(f"  {column_name} {data_type}{max_length} {nullable}{default}".strip())
+    return result
+
+def _fetch_primary_keys_for_tables(cursor, tables):
+    if not tables:
+        return {}
+    cursor.execute(
+        """
+        SELECT kcu.table_name, kcu.column_name
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+        WHERE tc.table_schema = 'public'
+          AND tc.constraint_type = 'PRIMARY KEY'
+          AND tc.table_name = ANY(%s)
+        ORDER BY kcu.table_name, kcu.ordinal_position
+        """,
+        (tables,)
+    )
+    pks = {}
+    for table_name, column_name in cursor.fetchall():
+        cols = pks.setdefault(table_name, [])
+        cols.append(column_name)
+    return pks
+
+def _fetch_foreign_keys_for_tables(cursor, tables):
+    if not tables:
+        return {}
+    cursor.execute(
+        """
+        SELECT
+          tc.table_name AS table_name,
+          kcu.column_name AS column_name,
+          ccu.table_name AS foreign_table_name,
+          ccu.column_name AS foreign_column_name
+        FROM information_schema.table_constraints AS tc
+        JOIN information_schema.key_column_usage AS kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+        JOIN information_schema.constraint_column_usage AS ccu
+          ON ccu.constraint_name = tc.constraint_name
+         AND ccu.table_schema = tc.table_schema
+        WHERE tc.constraint_type = 'FOREIGN KEY'
+          AND tc.table_schema = 'public'
+          AND tc.table_name = ANY(%s)
+        ORDER BY tc.table_name, kcu.ordinal_position
+        """,
+        (tables,)
+    )
+    fks = {}
+    for table_name, column_name, foreign_table_name, foreign_column_name in cursor.fetchall():
+        lst = fks.setdefault(table_name, [])
+        lst.append((column_name, foreign_table_name, foreign_column_name))
+    return fks
 
 @mcp.tool
 async def get_database_schema() -> str:
     """
-    Get the database schema information including all tables and columns.
+    Get complete database schema: tables, columns, primary keys, relationships, and small samples.
     
     Input: No input required - just call the function
     
     Returns:
-        str: Database schema information
+        str: Detailed schema information for all public tables, including relationships.
     """
     try:
         if postgres_conn is None:
@@ -204,86 +190,52 @@ async def get_database_schema() -> str:
         
         cursor = postgres_conn.cursor()
         try:
-            # Get all tables in public schema
-            cursor.execute("""
-                SELECT table_name 
-                FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_type = 'BASE TABLE'
-                ORDER BY table_name
-            """)
-            tables = [row[0] for row in cursor.fetchall()]
-            
-            schema_info = "Database Schema:\n\n"
+            tables = _fetch_tables(cursor)
+            cols_map = _fetch_columns_for_tables(cursor, tables)
+            pk_map = _fetch_primary_keys_for_tables(cursor, tables)
+            fks_map = _fetch_foreign_keys_for_tables(cursor, tables)
+
+            schema_info = "Database Schema (public):\n\n"
+            schema_info += "Tables: " + ", ".join(tables) + "\n\n"
             
             for table in tables:
-                # Get table structure
-                cursor.execute("""
-                    SELECT 
-                        column_name,
-                        data_type,
-                        is_nullable,
-                        column_default,
-                        character_maximum_length
-                    FROM information_schema.columns 
-                    WHERE table_schema = 'public' 
-                    AND table_name = %s
-                    ORDER BY ordinal_position
-                """, (table,))
-                
-                columns = []
-                for row in cursor.fetchall():
-                    col_name = row[0]
-                    col_type = row[1]
-                    is_nullable = "NULL" if row[2] == 'YES' else "NOT NULL"
-                    col_default = f" DEFAULT {row[3]}" if row[3] else ""
-                    max_length = f"({row[4]})" if row[4] else ""
-                    
-                    columns.append(f"  {col_name} {col_type}{max_length} {is_nullable}{col_default}".strip())
-                
-                # Get primary key information
-                cursor.execute("""
-                    SELECT column_name
-                    FROM information_schema.key_column_usage
-                    WHERE table_schema = 'public'
-                    AND table_name = %s
-                    AND constraint_name IN (
-                        SELECT constraint_name
-                        FROM information_schema.table_constraints
-                        WHERE table_schema = 'public'
-                        AND table_name = %s
-                        AND constraint_type = 'PRIMARY KEY'
-                    )
-                """, (table, table))
-                
-                primary_keys = [row[0] for row in cursor.fetchall()]
-                
+                # Describe table (columns + PKs)
+                columns = cols_map.get(table, [])
+                pks = pk_map.get(table, [])
+                schema_info += f"-- Table: {table}\n"
                 schema_info += f"CREATE TABLE {table} (\n"
                 schema_info += ",\n".join(columns)
-                if primary_keys:
-                    schema_info += f",\n  PRIMARY KEY ({', '.join(primary_keys)})"
+                if pks:
+                    schema_info += f",\n  PRIMARY KEY ({', '.join(pks)})"
                 schema_info += "\n);\n\n"
                 
-                # Get sample data
+                # Relationships for this table
+                fks = fks_map.get(table, [])
+                if fks:
+                    schema_info += "Relationships:\n"
+                    for col, ft, fc in fks:
+                        schema_info += f"  - {table}.{col} -> {ft}.{fc}\n"
+                    schema_info += "\n"
+                else:
+                    schema_info += "Relationships:\n  - None\n\n"
+
+                # Sample data
                 try:
                     cursor.execute(f'SELECT * FROM "{table}" LIMIT 3')
                     sample_rows = cursor.fetchall()
                     if sample_rows:
                         schema_info += f"/*\nSample data from {table}:\n"
-                        # Add column headers
                         if cursor.description:
                             headers = [desc[0] for desc in cursor.description]
                             schema_info += "\t".join(headers) + "\n"
-                        # Add sample rows
                         for row in sample_rows:
                             schema_info += "\t".join(str(val) for val in row) + "\n"
                         schema_info += "*/\n\n"
-                except:
-                    pass  # Skip sample data if there's an error
+                except Exception:
+                    pass
             
             postgres_conn.commit()
             return schema_info
-            
         except Exception as e:
             postgres_conn.rollback()
             raise e
@@ -293,202 +245,166 @@ async def get_database_schema() -> str:
     except Exception as e:
         return f"Error getting database schema: {str(e)}"
 
-@mcp.tool
-async def get_table_names() -> str:
-    """
-    Get list of all table names in the database.
-    
-    Input: No input required - just call the function
-    
-    Returns:
-        str: List of table names
-    """
-    try:
-        if postgres_conn is None:
-            return "Database not connected. Please connect first."
-        
-        cursor = postgres_conn.cursor()
-        cursor.execute("""
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = 'public' 
-            AND table_type = 'BASE TABLE'
-            ORDER BY table_name
-        """)
-        tables = [row[0] for row in cursor.fetchall()]
-        cursor.close()
-        return f"Available tables: {', '.join(tables)}"
-        
-    except Exception as e:
-        return f"Error getting table names: {str(e)}"
-
-@mcp.tool
-async def get_table_relationships() -> str:
-    """
-    Get information about how tables are connected through foreign keys and relationships.
-    
-    Input: No input required - just call the function
-    
-    Returns:
-        str: Table relationship information
-    """
-    try:
-        if postgres_conn is None:
-            return "Database not connected. Please connect first."
-        
-        cursor = postgres_conn.cursor()
-        
-        # Get all tables
-        cursor.execute("""
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = 'public' 
-            AND table_type = 'BASE TABLE'
-            ORDER BY table_name
-        """)
-        tables = [row[0] for row in cursor.fetchall()]
-        
-        relationship_info = "Table Relationships:\n\n"
-        
-        for table in tables:
-            # Get foreign key information
-            cursor.execute("""
-                SELECT 
-                    tc.constraint_name,
-                    kcu.column_name,
-                    ccu.table_name AS foreign_table_name,
-                    ccu.column_name AS foreign_column_name
-                FROM information_schema.table_constraints AS tc
-                JOIN information_schema.key_column_usage AS kcu
-                    ON tc.constraint_name = kcu.constraint_name
-                    AND tc.table_schema = kcu.table_schema
-                JOIN information_schema.constraint_column_usage AS ccu
-                    ON ccu.constraint_name = tc.constraint_name
-                    AND ccu.table_schema = tc.table_schema
-                WHERE tc.constraint_type = 'FOREIGN KEY'
-                AND tc.table_schema = 'public'
-                AND tc.table_name = %s
-            """, (table,))
-            
-            foreign_keys = cursor.fetchall()
-            
-            if foreign_keys:
-                relationship_info += f"Table '{table}' has foreign keys:\n"
-                for fk in foreign_keys:
-                    relationship_info += f"  - {fk[1]} -> {fk[2]}.{fk[3]}\n"
-                relationship_info += "\n"
-            else:
-                relationship_info += f"Table '{table}' has no foreign key relationships.\n\n"
-        
-        # Also check for common patterns (like user_id columns)
-        relationship_info += "Potential relationships based on column names:\n"
-        for table in tables:
-            cursor.execute("""
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = 'public'
-                AND table_name = %s
-            """, (table,))
-            
-            columns = [row[0] for row in cursor.fetchall()]
-            for col_name in columns:
-                if col_name.endswith('_id') and col_name != 'id':
-                    referenced_table = col_name[:-3]  # Remove '_id' suffix
-                    if referenced_table in tables:
-                        relationship_info += f"  - {table}.{col_name} likely references {referenced_table}.id\n"
-        
-        cursor.close()
-        return relationship_info
-        
     except Exception as e:
         return f"Error getting table relationships: {str(e)}"
 
+
 @mcp.tool
-async def describe_table(table_name: str) -> str:
+async def execute_sql(sql_query: str) -> str:
     """
-    Get detailed information about a specific table including columns and types.
-    
-    Input: table_name (string) - Name of the table to describe (e.g., "users", "products", "orders")
-        
-    Returns:
-        str: Table structure information
+    Execute a SQL query against the database. Returns the result.
+    Only SELECT queries are allowed; any DDL/DML will be rejected.
     """
     try:
         if postgres_conn is None:
             return "Database not connected. Please connect first."
         
-        cursor = postgres_conn.cursor()
-        
-        # Get table structure
-        cursor.execute("""
-            SELECT 
-                column_name,
-                data_type,
-                is_nullable,
-                column_default,
-                character_maximum_length
-            FROM information_schema.columns 
-            WHERE table_schema = 'public' 
-            AND table_name = %s
-            ORDER BY ordinal_position
-        """, (table_name,))
-        
-        columns = []
-        for row in cursor.fetchall():
-            col_name = row[0]
-            col_type = row[1]
-            is_nullable = "NULL" if row[2] == 'YES' else "NOT NULL"
-            col_default = f" DEFAULT {row[3]}" if row[3] else ""
-            max_length = f"({row[4]})" if row[4] else ""
-            
-            columns.append(f"  {col_name} {col_type}{max_length} {is_nullable}{col_default}".strip())
-        
-        # Get primary key information
-        cursor.execute("""
-            SELECT column_name
-            FROM information_schema.key_column_usage
-            WHERE table_schema = 'public'
-            AND table_name = %s
-            AND constraint_name IN (
-                SELECT constraint_name
-                FROM information_schema.table_constraints
-                WHERE table_schema = 'public'
-                AND table_name = %s
-                AND constraint_type = 'PRIMARY KEY'
-            )
-        """, (table_name, table_name))
-        
-        primary_keys = [row[0] for row in cursor.fetchall()]
-        
-        table_info = f"Table '{table_name}' structure:\n\n"
-        table_info += f"CREATE TABLE {table_name} (\n"
-        table_info += ",\n".join(columns)
-        if primary_keys:
-            table_info += f",\n  PRIMARY KEY ({', '.join(primary_keys)})"
-        table_info += "\n);\n\n"
-        
-        # Get sample data
+        # Sanitize incoming text (strip markdown code fences)
+        def _sanitize(s: str) -> str:
+            s = (s or "").strip()
+            s = re.sub(r"^```\s*sql\s*", "", s, flags=re.IGNORECASE)
+            s = re.sub(r"^```", "", s)
+            s = re.sub(r"```$", "", s)
+            return s.strip()
+
+        raw = _sanitize(sql_query)
+        upper = raw.upper()
+        # Allow SELECT and CTEs (WITH ... SELECT)
+        if not (upper.startswith("SELECT") or upper.startswith("WITH")):
+            return "Error: Only SELECT queries (including WITH ... SELECT) are allowed."
+
+        cursor = postgres_conn.cursor(cursor_factory=RealDictCursor)
         try:
-            cursor.execute(f'SELECT * FROM "{table_name}" LIMIT 3')
-            sample_rows = cursor.fetchall()
-            if sample_rows:
-                table_info += f"/*\nSample data from {table_name}:\n"
-                # Add column headers
-                if cursor.description:
-                    headers = [desc[0] for desc in cursor.description]
-                    table_info += "\t".join(headers) + "\n"
-                # Add sample rows
-                for row in sample_rows:
-                    table_info += "\t".join(str(val) for val in row) + "\n"
-                table_info += "*/\n"
-        except:
-            pass  # Skip sample data if there's an error
-        
-        cursor.close()
-        return table_info
-        
+            cursor.execute(raw)
+            # If there is a result set
+            if cursor.description:
+                rows = cursor.fetchall()
+                # Build plain-text table output
+                headers = [desc.name if hasattr(desc, 'name') else desc[0] for desc in cursor.description]
+                lines = []
+                lines.append(f"SQL Query: {sql_query}")
+                lines.append("")
+                lines.append("\t".join(str(h) for h in headers))
+                for row in rows:
+                    record = []
+                    for h in headers:
+                        val = dict(row).get(h)
+                        if hasattr(val, "isoformat"):
+                            val = val.isoformat()
+                        record.append(str(val))
+                    lines.append("\t".join(record))
+                postgres_conn.commit()
+                return "\n".join(lines)
+            else:
+                postgres_conn.commit()
+                return f"SQL Query: {sql_query}\n\nQuery executed successfully (no rows returned)"
+        except Exception as e:
+            postgres_conn.rollback()
+            return f"Error executing SQL query: {str(e)}"
+        finally:
+            cursor.close()
     except Exception as e:
-        return f"Error describing table '{table_name}': {str(e)}"
+        return f"Error executing SQL query: {str(e)}"
+
+
+
+@mcp.tool
+async def check_sql(sql_query: str) -> str:
+    """
+    Validate a SQL string before execution.
+    - Ensures SELECT-only (blocks DDL/DML keywords)
+    - Checks referenced tables exist in public schema
+    - Hints for quoting reserved identifiers
+    Returns a readable report; does not execute the query.
+    """
+    try:
+        if postgres_conn is None:
+            return "Database not connected. Please connect first."
+        
+        report_lines = []
+        # Sanitize incoming text (strip markdown code fences)
+        def _sanitize(s: str) -> str:
+            s = (s or "").strip()
+            s = re.sub(r"^```\s*sql\s*", "", s, flags=re.IGNORECASE)
+            s = re.sub(r"^```", "", s)
+            s = re.sub(r"```$", "", s)
+            return s.strip()
+
+        raw = _sanitize(sql_query)
+        if not raw:
+            return "Error: Empty query."
+
+        upper = raw.upper()
+        # Allow SELECT and CTEs (WITH ... SELECT)
+        if not (upper.startswith("SELECT") or upper.startswith("WITH")):
+            return "Blocked: Only SELECT queries (including WITH ... SELECT) are allowed."
+
+        # Block dangerous keywords anywhere in the query
+        if re.search(r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXEC|EXECUTE|CALL)\b", upper):
+            return "Blocked: Disallowed SQL keyword detected. Only SELECT is permitted."
+
+        # Extract table-like identifiers from FROM and JOIN clauses (supports quoted and schema-qualified)
+        table_candidates = set()
+        for pattern in [
+            r"\bFROM\s+(\"?[A-Za-z_][\w]*\"?(?:\.\"?[A-Za-z_][\w]*\"?)?)",
+            r"\bJOIN\s+(\"?[A-Za-z_][\w]*\"?(?:\.\"?[A-Za-z_][\w]*\"?)?)",
+        ]:
+            for m in re.finditer(pattern, raw, flags=re.IGNORECASE):
+                ident = m.group(1).strip()
+                # Remove alias if provided as schema.table alias
+                ident = ident.split()[0]
+                # Strip trailing punctuation
+                ident = ident.rstrip(",)")
+                # If quoted, keep as-is; else lower-case for lookup
+                if ident.startswith('"') and ident.endswith('"'):
+                    clean = ident.strip('"')
+                else:
+                    # If schema qualified, take last part
+                    clean = ident.split('.')[-1]
+                if clean:
+                    table_candidates.add(clean)
+
+        cursor = postgres_conn.cursor()
+        try:
+            # Check existence in public schema
+            existing = set()
+            missing = set()
+            for name in sorted(table_candidates):
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = %s
+                    """,
+                    (name,)
+                )
+                if cursor.fetchone():
+                    existing.add(name)
+                else:
+                    missing.add(name)
+
+            report_lines.append("Check: SELECT-only ✓")
+            report_lines.append("Tables referenced: " + (", ".join(sorted(table_candidates)) if table_candidates else "<none detected>"))
+            report_lines.append("Tables found: " + (", ".join(sorted(existing)) if existing else "<none>"))
+            report_lines.append("Tables missing: " + (", ".join(sorted(missing)) if missing else "<none>"))
+
+            # Hint for reserved words
+            reserved = {"user", "order", "group", "select", "from"}
+            need_quotes = sorted(t for t in existing if t.lower() in reserved)
+            if need_quotes:
+                report_lines.append("Hint: Quote reserved table names like \"" + "\", \"".join(need_quotes) + "\".")
+
+            status = "OK to execute" if not missing else "May fail: missing tables"
+            report_lines.append(f"Status: {status}")
+
+            return "\n".join(report_lines)
+        finally:
+            cursor.close()
+    except Exception as e:
+        return f"Error checking SQL: {str(e)}"
+
+
+        
 
 def main():
     """Main function to start the server."""

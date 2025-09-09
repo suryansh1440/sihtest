@@ -26,3 +26,7 @@ langgraph
 # NetCDF processing
 netCDF4>=1.6.5
 xarray>=2024.5.0
+
+# Data analysis and visualization
+pandas>=2.0.0
+plotly>=5.0.0
