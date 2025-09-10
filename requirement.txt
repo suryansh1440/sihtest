@@ -30,3 +30,7 @@ xarray>=2024.5.0
 # Data analysis and visualization
 pandas>=2.0.0
 plotly>=5.0.0
+
+# Flask API dependencies
+flask>=2.3.0
+flask-cors>=4.0.0
