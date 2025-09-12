@@ -1,7 +1,9 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from mcpclient import mcp_answer
 
 app = Flask(__name__)
+CORS(app, resources={r"/api/*": {"origins": ["http://localhost:5173", "http://127.0.0.1:5173"]}}, supports_credentials=True)
 
 
 @app.post("/api/ask")
@@ -14,11 +16,8 @@ def ask_once():
 
     try:
         result = mcp_answer(user_input)
-        return jsonify({
-            "thought": result.get("thought"),
-            "content": result.get("content"),
-            "graph": result.get("graph"),
-        })
+
+        return result
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 

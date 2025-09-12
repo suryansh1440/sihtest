@@ -1,0 +1,42 @@
+-- Drop the measurements table first, which depends on profiles.
+DROP TABLE IF EXISTS measurements;
+
+-- Now, drop the profiles table.
+DROP TABLE IF EXISTS profiles;
+
+-- Now you can safely recreate the profiles and measurements tables with the correct schema
+-- Recreate the profiles table
+CREATE TABLE profiles (
+    profile_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    platform_number VARCHAR(8) NOT NULL,
+    cycle_number INTEGER NOT NULL,
+    data_center VARCHAR(2),
+    data_mode CHAR(1) CHECK (data_mode IN ('D', 'A', 'R')),
+    data_type VARCHAR(16),
+    date_creation TIMESTAMP WITH TIME ZONE,
+    date_update TIMESTAMP WITH TIME ZONE,
+    dc_reference VARCHAR(32),
+    direction CHAR(1) CHECK (direction IN ('A', 'D')),
+    float_serial_no VARCHAR(32),
+    latitude DOUBLE PRECISION,
+    longitude DOUBLE PRECISION,
+    pi_name VARCHAR(64),
+    platform_type VARCHAR(32),
+    project_name VARCHAR(64),
+    scientific_calib JSONB
+);
+
+-- Recreate the measurements table
+CREATE TABLE measurements (
+    measurement_id BIGSERIAL PRIMARY KEY,
+    profile_id UUID REFERENCES profiles(profile_id) ON DELETE CASCADE,
+    pres REAL,
+    psal REAL,
+    temp REAL,
+    pres_adjusted REAL,
+    psal_adjusted REAL,
+    temp_adjusted REAL,
+    pres_adjusted_error REAL,
+    psal_adjusted_error REAL,
+    temp_adjusted_error REAL
+);
