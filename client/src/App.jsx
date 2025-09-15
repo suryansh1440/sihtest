@@ -2,14 +2,16 @@ import React from 'react'
 import Navbar from './components/Navbar'
 import Chatpage from './pages/Chatpage'
 import { Toaster } from 'react-hot-toast'
+import ChatMap from './components/ChatMap'
 const App = () => {
   return (
-    <div className='w-full h-[100vh] bg-gradient-to-b from-slate-50 to-slate-100'>
+    <div className='w-full h-[100vh] bg-gradient-to-b from-slate-50 to-slate-100 relative'>
       <Navbar />
-      <div className='max-w-5xl mx-auto px-4 sm:px-6 lg:px-8'>
+      <div className='w-full mx-auto'>
         <Chatpage />
         <Toaster/>
       </div>
+      <ChatMap/>
     </div>
   )
 }

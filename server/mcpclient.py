@@ -18,7 +18,8 @@ GEMINI_API_KEY = "AIzaSyAScRxgclKcIb8ZUsQaLOsF2H6z7dqm2bg"
 # MCP configuration for HTTP transport
 config = {
     "mcpServers": {
-        "supabaseassistant": {"command": "python", "args": ["./supabaseserver.py"]}
+        "supabaseassistant": {"command": "python", "args": ["./supabaseserver.py"]},
+        "mapdataserver": {"command": "python", "args": ["./mapdataserver.py"]}
         # "analysisagent": {"command": "python", "args": ["./analysisserver.py"]}
     }
 }
@@ -84,8 +85,8 @@ async def mcp_answer_once(user_input: str) -> dict:
             # Determine server name based on tool name
             if mcp_tool.name in ["get_database_schema", "execute_sql", "check_sql"]:
                 server_name = "supabase"
-            elif mcp_tool.name in ["analyze_data", "generate_html_report", "create_text_report"]:
-                server_name = "analysis"
+            elif mcp_tool.name in ["generate_map_data", "get_coordinate_info", "analyze_map_request"]:
+                server_name = "mapdata"
             else:
                 server_name = "supabase"  # default
 
@@ -101,7 +102,7 @@ async def mcp_answer_once(user_input: str) -> dict:
 
         # Use fully custom ReAct-style prompt with JSON output format
         prompt = ChatPromptTemplate.from_template(
-            """You are a helpful assistant with strong data analysis skills. You can handle both general questions and database-related queries. Use tools ONLY for database schema or SQL data fetching.
+            """You are a helpful assistant with strong data analysis skills and map visualization capabilities. You can handle general questions, database-related queries, and map data generation.
             
             Tools available:
             {tools}
@@ -109,16 +110,24 @@ async def mcp_answer_once(user_input: str) -> dict:
             POLICY
             - For general questions (greetings, general knowledge, non-database topics): Answer directly without using tools
             - For database queries: Use database tools for data retrieval (tables, schema, columns, relationships, data queries)
+            - For map visualization requests: Use map data tools to generate labels, hex bin, or heatmap data
             - Perform all analysis in-model: aggregate, compare, find trends/anomalies, compute KPIs
             - IMPORTANT: Always consider 2 plausible approaches before acting. If the first fails or returns no rows, infer the user intent and try a different operator/approach once
             - CRITICAL: When you get database schema, you MUST proceed to execute the actual SQL query to answer the user's question
+            - MAP DATA: For map requests, analyze the user's intent and generate appropriate visualization data
             
             WORKFLOW
             1) For general questions: Answer directly with JSON format
             2) For data queries: get_database_schema → check_sql → execute_sql (MUST complete all steps)
             3) For analysis requests: execute_sql (to fetch data) → reason in-model → summarize insights → emit graph SPECS (not code)
-            4) Quote reserved table names (e.g., user) with double quotes like \"user\"
-            5) Do not repeat the same tool when the result is unchanged
+            4) For map visualization: analyze_map_request → generate_map_data → return structured map data
+            5) Quote reserved table names (e.g., user) with double quotes like \"user\"
+            6) Do not repeat the same tool when the result is unchanged
+            
+            MAP DATA TOOL USAGE:
+            - For generate_map_data: Use format \"analysis_type,region,data_source\" (e.g., \"heatmap,indian_ocean,knowledge\")
+            - For get_coordinate_info: Use location name (e.g., \"Mumbai\")
+            - For analyze_map_request: Use natural language query (e.g., \"Show me cities in India with heatmap\")
             
              REACT FORMAT
              Question: the input question you must answer
@@ -128,11 +137,11 @@ async def mcp_answer_once(user_input: str) -> dict:
              Observation: the result of the action
              ... (repeat Thought/Action/Action Input/Observation as needed)
              Thought: I now know the final answer
-             Final Answer: {{"thought": ["approach1", "approach2"], "content": "analysis results", "graphs": [GRAPH_SPEC, GRAPH_SPEC, GRAPH_SPEC]}}
+             Final Answer: {{"thought": ["approach1", "approach2"], "content": "analysis results", "graphs": [GRAPH_SPEC, GRAPH_SPEC, GRAPH_SPEC], "map_data": MAP_DATA_SPEC}}
              
              CRITICAL FORMATTING RULES:
              - If you can answer WITHOUT tools (general questions), IMMEDIATELY output:
-               Final Answer: {{"thought": ["NA"], "content": "your answer", "graphs": []}}
+               Final Answer: {{"thought": ["NA"], "content": "your answer", "graphs": [], "map_data": null}}
              - If you need database data, ALWAYS follow the ReAct format above
              - NEVER skip the Action: and Action Input: lines when using tools
             
@@ -141,10 +150,12 @@ async def mcp_answer_once(user_input: str) -> dict:
             FINAL ANSWER FORMAT
             Your Final Answer MUST be a valid JSON object with this exact structure:
             
-            
+            {{
             \"thought\": [\"approach1\", \"approach2\"],
             \"content\": \"your main response content here\",
-            \"graphs\": [GRAPH_SPEC, GRAPH_SPEC, GRAPH_SPEC]
+            \"graphs\": [GRAPH_SPEC, GRAPH_SPEC, GRAPH_SPEC],
+            \"map_data\": MAP_DATA_SPEC (only for map visualization requests)
+            }}
             
             
             GRAPH_SPEC SCHEMA (STRICT):
@@ -158,6 +169,25 @@ async def mcp_answer_once(user_input: str) -> dict:
             \"yKey\": string OR [string],  // key(s) for y values/series (array for multi-series)
             \"seriesNames\": [string],     // optional names for multi-series
             \"colors\": [string]           // optional hex/color names
+            
+            MAP_DATA_SPEC SCHEMA (for map visualization requests):
+            MAP_DATA_SPEC MUST be a JSON object with these fields:
+            
+            \"title\": string,             // Map visualization title
+            \"description\": string,        // Map visualization description
+            \"visualization_type\": string, // \"labels\", \"hexbin\", \"heatmap\", or \"all\"
+            \"region\": string,            // Geographic region
+            \"data\": {{
+                \"labels\": [              // Optional labels layer data
+                    {{\"lat\": number, \"lng\": number, \"text\": string, \"color\": string, \"size\": number, \"altitude\": number}}
+                ],
+                \"hexbin\": [              // Optional hex bin layer data
+                    {{\"lat\": number, \"lng\": number, \"weight\": number}}
+                ],
+                \"heatmap\": [             // Optional heatmap layer data
+                    {{\"lat\": number, \"lng\": number, \"weight\": number}}
+                ]
+            }}
             
             
             DATA REQUIREMENTS:
@@ -184,8 +214,9 @@ async def mcp_answer_once(user_input: str) -> dict:
             - For general questions: \"graphs\": []
             
             RULES FOR JSON OUTPUT:
-            - For general questions: thought=[\"NA\"], content=your answer, graphs=[]
-            - For database queries: thought=[\"approach1\", \"approach2\"], content=analysis results, graphs=[GRAPH_SPEC...]
+            - For general questions: thought=[\"NA\"], content=your answer, graphs=[], map_data=null
+            - For database queries: thought=[\"approach1\", \"approach2\"], content=analysis results, graphs=[GRAPH_SPEC...], map_data=null
+            - For map visualization: thought=[\"approach1\", \"approach2\"], content=map analysis, graphs=[], map_data=MAP_DATA_SPEC
             - Always ensure valid JSON format with proper escaping
             
             Begin!

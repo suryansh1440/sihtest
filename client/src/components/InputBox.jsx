@@ -32,7 +32,7 @@ const InputBox = () => {
 
     }
   return (
-    <div className='flex items-center gap-2'>
+    <div className='flex items-center gap-2 rounded-xl'>
       <input
         type="text"
         placeholder='Enter your message'
