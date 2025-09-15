@@ -1,16 +1,17 @@
 from dotenv import load_dotenv
 load_dotenv()
 import os
-import pandas as pd
 import json
+import re
 import logging
 from datetime import datetime
 
 from crewai import LLM,Agent,Task,Crew
 from crewai_tools import SerperDevTool
-from crewai.tools import tool
 from crewai_tools import MCPServerAdapter
 from mcp import StdioServerParameters
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any, Optional, Union, Literal
 
 
 # Configure LLM for Gemini
@@ -20,84 +21,69 @@ llm = LLM(
     api_key=os.getenv("GEMINI_API_KEY")  # Use the correct environment variable
 )
 
-# Custom tool for JSON report generation
-@tool("JSON Report Generator")
-def generate_json_report(thought: str, report_content: str, graphs_data: str = "[]", maps_data: str = "[]") -> str:
-    """
-    Generates a structured JSON report combining thought, content, multiple graphs, and multiple maps.
-    The graphs_data and maps_data should be JSON arrays containing visualization information.
-    """
-    try:
-        # Parse the input data as arrays
-        graphs_parsed = json.loads(graphs_data) if graphs_data else []
-        maps_parsed = json.loads(maps_data) if maps_data else []
-        
-        # Ensure inputs are arrays
-        if not isinstance(graphs_parsed, list):
-            graphs_parsed = [graphs_parsed] if graphs_parsed else []
-        if not isinstance(maps_parsed, list):
-            maps_parsed = [maps_parsed] if maps_parsed else []
-        
-        # Process graphs array
-        processed_graphs = []
-        for graph in graphs_parsed:
-            if isinstance(graph, str):
-                try:
-                    graph = json.loads(graph)
-                except:
-                    continue
-            
-            processed_graph = {
-                "type": graph.get("type", "line"),
-                "title": graph.get("title", "Data Visualization"),
-                "description": graph.get("description", "Data visualization"),
-                "data": graph.get("dataPoints", []),
-                "xKey": graph.get("xKey", "x"),
-                "yKey": graph.get("yKey", "y"),
-                "seriesNames": graph.get("yKeys", []),
-                "colors": graph.get("colors", ["blue"])
-            }
-            processed_graphs.append(processed_graph)
-        
-        # Process maps array - format for ChatMap component
-        processed_maps = []
-        for map_data in maps_parsed:
-            if isinstance(map_data, str):
-                try:
-                    map_data = json.loads(map_data)
-                except:
-                    continue
-            
-            # Create map object with all available data arrays
-            processed_map = {
-                "title": map_data.get("title", "Interactive Globe View"),
-                "description": map_data.get("description", "3D globe visualization"),
-                "labelsData": map_data.get("labels", []),
-                "hexBinPointsData": map_data.get("hexbin", []),
-                "heatmapsData": map_data.get("heatmap", [])
-            }
-            
-            processed_maps.append(processed_map)
-        
-        # Create the structured report
-        report = {
-            "thought": thought,
-            "result": {
-                "report": {
-                    "title": "Data Analysis Report",
-                    "content": report_content
-                },
-                "graphs": processed_graphs,
-                "maps": processed_maps
-            }
-        }
-        
-        return json.dumps(report, indent=2)
-        
-    except json.JSONDecodeError as e:
-        return f"Error parsing JSON data: {str(e)}"
-    except Exception as e:
-        return f"Error generating report: {str(e)}"
+class MapLabel(BaseModel):
+    lat: float
+    lng: float
+    text: str
+    color: str
+    size: float
+    altitude: float
+
+class MapHexbin(BaseModel):
+    lat: float
+    lng: float
+    weight: float
+
+class MapHeatmap(BaseModel):
+    lat: float
+    lng: float
+    weight: float
+
+# Define the models for each map type using discriminated unions
+class BaseMap(BaseModel):
+    title: str
+    description: str
+
+class LabelsMap(BaseMap):
+    type: Literal["labels"] = "labels"
+    data: List[MapLabel] = Field(..., description="List of label data points.")
+
+class HexbinMap(BaseMap):
+    type: Literal["hexbin"] = "hexbin"
+    data: List[MapHexbin] = Field(..., description="List of hexbin data points.")
+
+class HeatmapMap(BaseMap):
+    type: Literal["heatmap"] = "heatmap"
+    data: List[MapHeatmap] = Field(..., description="List of heatmap data points.")
+
+# Union to allow the 'maps' list to contain different types of map objects
+MapItem = Union[LabelsMap, HexbinMap, HeatmapMap]
+
+# Pydantic model for report content
+class Report(BaseModel):
+    title: str
+    content: str
+
+# Pydantic model for graph data
+class Graph(BaseModel):
+    type: str = Field(..., description="The type of chart, e.g., 'bar', 'line', 'pie', etc.")
+    title: str = Field(..., description="Title of the graph.")
+    description: str = Field(..., description="A brief description of what the graph shows.")
+    data: List[Dict[str, Any]] = Field(..., description="The data points for the chart. Each item is a dictionary.")
+    xKey: str = Field(..., description="The key in the data dictionaries to use for the x-axis.")
+    yKey: Union[str, List[str]] = Field(..., description="The key(s) in the data dictionaries to use for the y-values.")
+    seriesNames: Optional[List[str]] = None
+    colors: Optional[List[str]] = None
+
+# The final Pydantic model for the complete result
+class FinalOutputModel(BaseModel):
+    thought: str = Field(..., description="The agent's internal thought process and reasoning.")
+    report: Report
+    graphs: List[Graph]
+    maps: List[MapItem]
+
+
+# Removed JSON report generator tool per requirements
 
 server_params = StdioServerParameters(
     command=".venv/Scripts/python.exe", 
@@ -106,205 +92,146 @@ server_params = StdioServerParameters(
     
 )
 
-with MCPServerAdapter(server_params) as tools:
-    print(f"Available tools from Stdio MCP server: {[tool.name for tool in tools]}")
-        
-    # 1. Query Analyst Agent 🕵️
-    query_analyst = Agent(
-        role="Query Analysis Specialist",
-        goal="Understand user intent and decompose complex queries into manageable sub-tasks",
-        backstory="You are an expert at understanding natural language queries and breaking them down into clear, actionable components. You excel at identifying what information is needed and categorizing the type of request (data analysis, visualization, reporting).",
-        verbose=True,
-        llm=llm
-    )
+def run_crewai_pipeline(query: str, verbose: bool = True) -> Dict[str, Any]:
+    """Run the CrewAI pipeline for a user query and return a JSON-serializable dict.
 
-    # 2. Data Retrieval Agent 💾
-    data_retrieval = Agent(
-        role="Database Query Specialist", 
-        goal="Execute database queries and retrieve relevant data using MCP tools and external search",
-        backstory="You are a database expert who specializes in writing efficient SQL queries and retrieving data from databases. You use MCP tools to interact with Supabase and external search tools for supplementary data. When using SerperDevTool, ALWAYS use very specific search queries like 'station 19005 coordinates' or 'buoy indian ocean latitude longitude'. Never use broad searches. Limit to 2-3 targeted searches maximum.",
-        tools=[SerperDevTool(), *tools],  # MCP tools + external search
-        verbose=True,
-        llm=llm
-    )
+    Parameters:
+        query: Natural language request from the user.
+        verbose: If True, prints progress messages.
 
-    # 3. Data Analysis & Reporting Agent 📊
-    data_analyst = Agent(
-        role="Data Analysis & Reporting Specialist",
-        goal="Analyze retrieved data and generate comprehensive reports with visualizations compatible with ChatMap component",
-        backstory="""You are a data scientist who excels at analyzing datasets, identifying patterns, and creating comprehensive reports. 
-        You transform raw data into actionable insights and generate structured outputs for visualization. 
-        You perform statistical analysis manually and create detailed reports without external tools. 
-        You understand the ChatMap component format and create map data with title, description, and all data arrays.
-        
-        Format examples:
-        - labelsData: [{"lat": 40.7128, "lng": -74.0060, "text": "New York", "color": "#ff6b6b", "size": 1.8, "altitude": 0.01}]
-        - hexBinPointsData: [{"lat": 40.7128, "lng": -74.0060, "weight": 15}]
-        - heatmapsData: [{"lat": 19.0760, "lng": 72.8777, "weight": 0.9}]""",
-        tools=[generate_json_report],  # Only JSON report generation tool
-        verbose=True,
-        llm=llm
-    )
+    Returns:
+        Dict matching FinalOutputModel schema.
+    """
+    with MCPServerAdapter(server_params) as tools:
+        if verbose:
+            print(f"Available tools from Stdio MCP server: {[tool.name for tool in tools]}")
 
-    # 4. Map Data Generation Agent 🗺️
-    map_agent = Agent(
-        role="Geographic Data Specialist",
-        goal="Generate geolocation data and coordinates for 3D globe visualization compatible with ChatMap component",
-        backstory="""You are a geographic data expert who specializes in finding latitude and longitude coordinates for locations. 
-        You retrieve location data from databases and use external tools to geocode locations not in the database. 
-        You understand the ChatMap component format and create map data with proper title, description, and all data arrays.
-        
-        Format examples:
-        - labelsData: [{"lat": 40.7128, "lng": -74.0060, "text": "New York", "color": "#ff6b6b", "size": 1.8, "altitude": 0.01}]
-        - hexBinPointsData: [{"lat": 40.7128, "lng": -74.0060, "weight": 15}]
-        - heatmapsData: [{"lat": 19.0760, "lng": 72.8777, "weight": 0.9}]
-        
-        When using SerperDevTool, use VERY SPECIFIC searches like 'station 19005 exact coordinates' or 'buoy indian ocean latitude longitude'. Limit to 1-2 targeted searches.""",
-        tools=[SerperDevTool(), *tools],  # For location data and geocoding
-        verbose=True,
-        llm=llm
-    )
+        query_analyst = Agent(
+            role="Query Analysis Specialist",
+            goal="Understand user intent,get database schema and decompose complex queries into manageable sub-tasks and produce a concise plan of what geolocation info is needed to make report and generate map and graphs",
+            backstory="You analyze the user's request and output exactly what geolocation (lat/lng of ocean regions like Atlantic or Indian Ocean) is needed and what the final JSON should contain.You are an expert at understanding natural language queries and breaking them down into clear, actionable components. You excel at identifying what information is needed and categorizing the type of request (data analysis, visualization, reporting).",
+            tools=[*tools],
+            verbose=True,
+            llm=llm,
+            max_iter=2
+        )
 
-    # Task 1: Query Decomposition
-    query_decomposition = Task(
-        description="Analyze the user query '{query}' and break it down into clear components. Identify what data needs to be retrieved and what type of analysis is required.",
-        agent=query_analyst,
-        expected_output="A structured breakdown of the query including: 1) Main intent, 2) Required data fields, 3) Analysis type needed, 4) Any constraints or filters"
-    )
+        data_retrieval = Agent(
+            role="Database Query Specialist", 
+            goal="Execute database queries and retrieve relevant data using MCP tools and get only geolocation data using external search",
+            backstory="You are a database expert who specializes in writing efficient SQL queries and retrieving data from databases. You use MCP tools to interact with Supabase and external search tools for supplementary data. When using SerperDevTool, ALWAYS use very specific search queries like'buoy indian ocean latitude longitude'. Never use broad searches. Limit to 1 targeted searches maximum.",
+            tools=[SerperDevTool(), *tools],
+            verbose=True,
+            llm=llm,
+            max_iter=4
+        )
 
-    # Task 2: Intent Classification
-    intent_classification = Task(
-        description="Categorize the user's request into one of: 'data analysis', 'map visualization', 'report generation', or 'combined'. Determine if the query requires geographic data, statistical analysis, or both.",
-        agent=query_analyst,
-        expected_output="Clear classification of the request type and identification of required visualization components (charts, maps, or both)",
-        context=[query_decomposition]
-    )
+        data_analyst = Agent(
+            role="Data Analysis & graph and map generation Specialist",
+            goal="Analyze retrieved data & generate the final JSON report and map arrays in the exact specified format",
+            backstory="""You are a data scientist who excels at analyzing datasets, 
+            identifying patterns, and creating comprehensive reports. 
+            You transform raw data into actionable insights and generate structured 
+            outputs for visualization. 
+            You perform statistical analysis manually and create detailed reports """,
+            tools=[],
+            verbose=True,
+            llm=llm,
+            max_iter=2
+        )
 
-    # Task 3: Database Querying
-    database_query = Task(
-        description="Based on the query analysis, execute the appropriate database query using MCP tools. Retrieve the relevant data from the Supabase database.",
-        agent=data_retrieval,
-        expected_output="Raw data retrieved from the database in a structured format",
-        context=[query_decomposition, intent_classification],
-        tools=[*tools]
-    )
+        understand_request = Task(
+            description="""Analyze the user query '{query}' and specify:
+            - Target ocean region(s) requiring geolocation (e.g., Indian Ocean, Atlantic Ocean)
+            - Exactly what lat/lng to retrieve (central or representative coordinates)
+            - Get database schema to understand the data you need to retrieve from the database and from the external search.
+            Output a concise plan.
+            You must use the tools available to you to get the data you need.""",
+            agent=query_analyst,
+            tools=[*tools],
+            expected_output="Plan listing ocean regions and the exact geolocation info to fetch and from where to fetch the data"
+        )
 
-    # Task 4: External Data Search
-    external_data_search = Task(
-        description="If the query requires specific coordinates or location data not in the database, use SerperDevTool with VERY SPECIFIC search queries. Use targeted searches like 'station 19005 coordinates latitude longitude' or 'buoy location indian ocean coordinates'. Avoid broad searches. Limit to 2-3 specific searches maximum.",
-        agent=data_retrieval,
-        expected_output="Specific external data with exact coordinates or location information",
-        context=[query_decomposition, intent_classification, database_query],
-        tools=[SerperDevTool()]
-    )
+        database_query = Task(
+            description=(
+                "Use MCP database tools to first inspect the schema, then EXECUTE AGGREGATED QUERIES to reduce volume. "
+                "Return per-cycle aggregates for the requested station: "
+                "Example of query try to use avg because it will reduce the volume of data you need to fetch: SELECT cycle_number AS cycle, AVG(temp) AS temp, AVG(psal) AS psal FROM measurements JOIN profiles ON profiles.profile_id = measurements.profile_id "
+                "WHERE profiles.platform_number = 19005 GROUP BY cycle_number ORDER BY cycle_number; this is only example "
+                "Also return a small sample of distinct latitude/longitude pairs for mapping (e.g., first 3 cycles) and any needed timestamps."
+                "Output must be structured tabular results with clear field names."
+            ),
+            agent=data_retrieval,
+            expected_output="A concise structured dataset containing all fields needed to satisfy the user's request.",
+            context=[understand_request],
+            tools=[*tools]
+        )
 
-    # Task 5: Data Processing & Analysis
-    data_processing = Task(
-        description="Clean and process the retrieved data. Perform statistical analysis, handle missing values, calculate averages, and identify trends. Analyze the data manually and provide detailed statistical insights.",
-        agent=data_analyst,
-        expected_output="Processed data with statistical analysis and insights",
-        context=[query_decomposition, intent_classification, database_query, external_data_search],
-        tools=[]
-    )
+        external_geolocation_search = Task(
+            description="Use SerperDevTool with VERY SPECIFIC queries to fetch precise latitude/longitude for the identified ocean regions. Limit to 1-2 searches. Return exact coordinates only.You must use the tools available to you to get the data you need.",
+            agent=data_retrieval,
+            expected_output="Exact lat/lng for each requested region.You must use the tools available to you to get the data you need.",
+            context=[understand_request],
+            tools=[SerperDevTool()]
+        )
 
-    # Task 6: Content Generation
-    content_generation = Task(
-        description="Write a natural language report summarizing the findings. Create clear, concise content that explains the data analysis results. Generate ONE comprehensive report.",
-        agent=data_analyst,
-        expected_output="Human-readable report content summarizing the analysis findings",
-        context=[query_decomposition, intent_classification, data_processing],
-        tools=[]
-    )
+        result_maker = Task(
+            description=(
+                "Generate ONLY the final JSON (no markdown). STRICTLY follow FinalOutputModel and this format: "
+                "report.title, report.content; graphs MUST include: "
+                "1) line 'Temperature Over Cycles' with xKey='cycle', yKey='temp'; "
+                "2) line 'Salinity Over Cycles' with xKey='cycle', yKey='psal'; "
+                "3) scatter 'Temperature vs Salinity' with xKey='temp', yKey='psal'. "
+                "Use aggregated per-cycle averages for lines. Data objects MUST include keys matching xKey/yKey; no empty objects; keep each graph <= 200 points. "
+                "maps should include at least one 'labels' map with lat/lng points for station cycles; optionally include 'hexbin' or 'heatmap'. "
+                "All numbers must be numeric; lat in [-90,90], lng in [-180,180]. Do not add extra keys."
+            ),
+            agent=data_analyst,
+            context=[understand_request, database_query, external_geolocation_search],
+            output_json=FinalOutputModel,
+            expected_output="A single JSON object formatted as per FinalOutputModel with no additional text."
+        )
 
-    # Task 7: Graph Data Generation
-    graph_generation = Task(
-        description="Create structured data for chart generation. Generate an ARRAY of graph objects, each containing type (bar, line, pie, scatter, area), title, description, data points, xKey, yKey, and colors. Create multiple graphs if needed for different data aspects.",
-        agent=data_analyst,
-        expected_output="ARRAY of JSON structures for graph visualization with all required fields",
-        context=[query_decomposition, intent_classification, data_processing],
-        tools=[]
-    )
+        crew = Crew(
+            agents=[query_analyst, data_retrieval, data_analyst],
+            tasks=[
+                understand_request,
+                database_query,
+                external_geolocation_search,
+                result_maker
+            ],
+            process="sequential",
+            max_iter=2,
+            max_execution_time=120,
+            verbose=True
+        )
 
-    # Task 8: Location Data Retrieval
-    location_data_retrieval = Task(
-        description="Fetch latitude and longitude coordinates from the database for known data points. Use MCP tools to retrieve location data.",
-        agent=map_agent,
-        expected_output="Location data with lat/lng coordinates from the database",
-        context=[query_decomposition, intent_classification, database_query],
-        tools=[*tools]
-    )
+        input_data = {"query": query}
 
-    # Task 9: Geocoding
-    geocoding = Task(
-        description="If the user query mentions specific locations without explicit coordinates, use SerperDevTool with TARGETED searches like 'station 19005 latitude longitude coordinates' or 'buoy indian ocean exact location'. Use only 1-2 very specific searches. Avoid broad geographic searches.",
-        agent=map_agent,
-        expected_output="Exact geocoded coordinates for specific locations",
-        context=[query_decomposition, intent_classification, location_data_retrieval],
-        tools=[SerperDevTool()]
-    )
+        if verbose:
+            print("🚀 Starting CrewAI execution with simplified 3-agent architecture...")
+            print(f"📊 Available MCP tools: {[tool.name for tool in tools]}")
+            print(f"🔧 Process: Sequential (Gemini compatible)")
+            print(f"🔑 Gemini API Key: {'✅ Set' if os.getenv('GEMINI_API_KEY') else '❌ Missing'}")
+            print("=" * 60)
 
-    # Task 10: Map Data Generation
-    map_data_generation = Task(
-        description="""Generate JSON structure for 3D globe visualization compatible with ChatMap component. 
-        Create an ARRAY of map objects with this EXACT format:
-        
-        For labelsData: [{"lat": 40.7128, "lng": -74.0060, "text": "New York", "color": "#ff6b6b", "size": 1.8, "altitude": 0.01}]
-        
-        For hexBinPointsData: [{"lat": 40.7128, "lng": -74.0060, "weight": 15}]
-        
-        For heatmapsData: [{"lat": 19.0760, "lng": 72.8777, "weight": 0.9}]
-        
-        Each map object should have: title, description, labelsData, hexBinPointsData, heatmapsData""",
-        agent=map_agent,
-        expected_output="ARRAY of JSON structures matching ChatMap.jsx demo data format exactly",
-        context=[query_decomposition, intent_classification, location_data_retrieval, geocoding],
-        tools=[]
-    )
-
-    # Task 11: Final JSON Report Generation
-    final_report_generation = Task(
-        description="Combine all analysis results into the final JSON report format. Use the generate_json_report tool ONCE to create the complete output with thought, result, report, graphs array, and maps array sections.",
-        agent=data_analyst,
-        expected_output="Complete JSON report in the required format with thought, result, report, graphs array, and maps array sections",
-        context=[content_generation, graph_generation, map_data_generation],
-        tools=[generate_json_report]
-    )
-
-    # Create the crew with basic configuration (avoiding advanced features that require OpenAI)
-    crew = Crew(
-        agents=[query_analyst, data_retrieval, data_analyst, map_agent],
-        tasks=[
-            query_decomposition, intent_classification, database_query, external_data_search,
-            data_processing, content_generation, graph_generation, location_data_retrieval,
-            geocoding, map_data_generation, final_report_generation
-        ],
-        process="sequential",  # Use sequential process
-        max_iter=2,  # Further reduced to prevent excessive iterations
-        max_execution_time=120,  # Reduced timeout to 2 minutes
-        verbose=True
-    )
-
-    # Test input
-    input_data = {
-        "query": "Show me the temperature and salinity data in the indian ocean for the station no. 19005 and also show me a map of the buoy locations"
-    }
-
-    print("🚀 Starting CrewAI execution with 4-agent architecture...")
-    print(f"📊 Available MCP tools: {[tool.name for tool in tools]}")
-    print(f"🔧 Process: Sequential (Gemini compatible)")
-    print(f"🧠 Memory: Enabled for context retention")
-    print(f"⚡ Cache: Enabled for efficiency")
-    print(f"📈 Max RPM: 60 requests per minute")
-    print(f"🔑 Gemini API Key: {'✅ Set' if os.getenv('GEMINI_API_KEY') else '❌ Missing'}")
-    print("=" * 60)
-
-    # Execute the crew
-    try:
         result = crew.kickoff(input_data)
-        print("\n✅ CREW EXECUTION COMPLETED SUCCESSFULLY!")
-        print("=" * 60)
-        print("📋 FINAL RESULT:")
-        print(result)
+
+        # Parse raw JSON output; strip ```json fences if present
+        if isinstance(result, BaseModel):
+            return result.model_dump()
+        if isinstance(result, dict):
+            return result
+        # Treat as string and sanitize fenced blocks
+        text = str(result)
+        clean_text = re.sub(r"```json\n?|\n?```", "", text).strip()
+        return json.loads(clean_text)
+
+
+if __name__ == "__main__":
+    demo_query = "Show me the temperature and salinity data in the indian ocean for the station no. 19005"
+    try:
+        output = run_crewai_pipeline(demo_query, verbose=True)
+        print("\n📋 FINAL RESULT:\n", json.dumps(output, indent=2))
     except Exception as e:
         print(f"\n❌ CREW EXECUTION FAILED: {e}")
-        print("=" * 60)

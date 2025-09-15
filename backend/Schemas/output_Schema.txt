@@ -1,0 +1,62 @@
+object={
+    report:{
+        title:string,
+        content:string
+    },
+    graphs:[{
+        type:string,
+        title:string,
+        description:string,
+        data:[{
+            x:string,
+            y:string
+        }],
+        xKey:string,
+        yKey:string,
+        colors:[string]
+    }],
+    maps:[
+        // if type is labels, then data will be like this:
+        {
+            title:string,
+            description:string,
+            type:labels,
+            data:[
+                {
+                    lat:number,
+                    lng:number,
+                    text:string,
+                    color:string,
+                    size:number,
+                    altitude:number,
+                }
+            ]
+        },
+        // if type is hexbin, then data will be like this:
+        {
+            title:string,
+            description:string,
+            type:hexbin,
+            data:[
+                {
+                    lat:number,
+                    lng:number,
+                    weight:number,
+                }
+            ]
+        },
+        // if type is heatmap, then data will be like this:
+        {
+            title:string,
+            description:string,
+            type:heatmap,
+            data:[
+                {
+                    lat:number,
+                    lng:number,
+                    weight:number,
+                }
+            ]
+        }
+    ]
+}
