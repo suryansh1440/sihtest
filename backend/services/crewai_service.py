@@ -82,6 +82,9 @@ class FinalOutputModel(BaseModel):
     graphs: List[Graph]
     maps: List[MapItem]
 
+class RouterOutput(BaseModel):
+    route: Literal["CONVERSATION", "LOOKUP", "REPORT"]
+
 
 # Removed JSON report generator tool per requirements
 
@@ -102,10 +105,112 @@ def run_crewai_pipeline(query: str, verbose: bool = True) -> Dict[str, Any]:
     Returns:
         Dict matching FinalOutputModel schema.
     """
+
+    # 1) First, run a tiny Router Crew to classify the query
+    router_agent = Agent(
+        role="Router",
+        goal="Classify the user's query.",
+        backstory=(
+            "Your ONLY job is to classify the query. Output exactly one word: "
+            "CONVERSATION, LOOKUP, or REPORT."
+        ),
+        verbose=True,
+        llm=llm,
+        max_iter=1
+    )
+    route_task = Task(
+        description=(
+            "Classify this query: '{query}'.\n"
+            "Rules:\n"
+            "- CONVERSATION: greetings/small talk/general chat.\n"
+            "- LOOKUP: simple data lookup (brief values), no graphs/maps unless requested.\n"
+            "- REPORT: full analysis/report with possible graphs/maps if relevant.\n"
+            "Output JSON exactly as: {\"route\": \"CONVERSATION\"} or {\"route\": \"LOOKUP\"} or {\"route\": \"REPORT\"}. No other text.\n"
+            "Examples:\n"
+            "- 'hi how are you' => {\"route\": \"CONVERSATION\"}\n"
+            "- 'give me count of all cycles for 19005' => {\"route\": \"LOOKUP\"}\n"
+            "- 'analyze trends and create graphs in alantic ocean' => {\"route\": \"REPORT\"}"
+        ),
+        agent=router_agent,
+        output_json=RouterOutput,
+        expected_output="JSON with a single 'route' field"
+    )
+    router_crew = Crew(
+        agents=[router_agent],
+        tasks=[route_task],
+        process="sequential",
+        max_iter=1,
+        max_execution_time=30,
+        verbose=True
+    )
+    # 2) Run the appropriate specialized crew
     with MCPServerAdapter(server_params) as tools:
         if verbose:
             print(f"Available tools from Stdio MCP server: {[tool.name for tool in tools]}")
 
+        # Only allow schema-related tools for the understand step
+        schema_tools = [tool for tool in tools if getattr(tool, "name", "") in ["get_database_schema"]]
+
+
+        # convo agent and task
+        convo_agent = Agent(
+            role="Conversational Assistant",
+            goal="Respond to greetings or general chat tersely user query {query}.",
+            backstory="You keep responses short and helpful. No tools.",
+            verbose=False,
+            llm=llm,
+            max_iter=1
+        )
+        convo_task = Task(
+            description=(
+                    "Produce FinalOutputModel: a brief friendly reply in report.content for user query {query}. "
+                    "Set graphs=[] and maps=[]. Keep report.title='Assistant'."
+            ),
+            agent=convo_agent,
+            output_json=FinalOutputModel,
+            expected_output="A single JSON object with minimal reply"
+        )
+
+
+
+
+
+        # Lookup-only agent (no heavy analysis)
+        lookup_data_retrieval = Agent(
+            role="Database query Specialist",
+            goal="Perform simple database lookups and brief aggregations; return concise values only.",
+            backstory="You fetch small, targeted results fast. No graphs or maps unless explicitly asked.",
+            tools=[*tools],
+            verbose=True,
+            llm=llm,
+            max_iter=2
+        )
+        lookup_database_query = Task(
+            description=(
+                "Perform a SIMPLE LOOKUP based on the user's request using MCP DB tools for user query {query}. "
+                "Prefer small aggregates such as COUNT(*), MIN/MAX, AVG by cycle if relevant. "
+                "Return only a tiny result table with clear field names. Do not include graphs or maps."
+                "first get the database schema then check the sql then excute query"
+            ),
+            agent=lookup_data_retrieval,
+            expected_output="Small structured dataset with the requested lookup values.",
+            tools=[*tools]
+        )
+        result_maker_lookup = Task(
+            description=(
+                    "Return ONLY FinalOutputModel with a short report summarizing fetched values. "
+                    "Unless the user explicitly asked for graphs/maps, set graphs=[] and maps=[]."
+            ),
+            agent=lookup_data_retrieval,
+            context=[lookup_database_query],
+            output_json=FinalOutputModel,
+            expected_output="JSON with report filled, graphs and maps likely empty"
+        )
+
+
+
+
+        # Report-only agents and tasks (heavy analysis)
         query_analyst = Agent(
             role="Query Analysis Specialist",
             goal="Understand user intent,get database schema and decompose complex queries into manageable sub-tasks and produce a concise plan of what geolocation info is needed to make report and generate map and graphs",
@@ -115,6 +220,7 @@ def run_crewai_pipeline(query: str, verbose: bool = True) -> Dict[str, Any]:
             llm=llm,
             max_iter=2
         )
+
 
         data_retrieval = Agent(
             role="Database Query Specialist", 
@@ -141,58 +247,96 @@ def run_crewai_pipeline(query: str, verbose: bool = True) -> Dict[str, Any]:
         )
 
         understand_request = Task(
-            description="""Analyze the user query '{query}' and specify:
-            - Target ocean region(s) requiring geolocation (e.g., Indian Ocean, Atlantic Ocean)
-            - Exactly what lat/lng to retrieve (central or representative coordinates)
-            - Get database schema to understand the data you need to retrieve from the database and from the external search.
-            Output a concise plan.
-            You must use the tools available to you to get the data you need.""",
+            description="""Analyze the user query '{query}' and determine:
+            1. Query type: station-specific, ocean-region, time-based, or comparison
+            2. Target variables needed (temp, psal, etc.)
+            3. Aggregation level required (by cycle, by station, by month, by ocean region)
+            4. Geographic constraints (latitude/longitude ranges for ocean regions)
+            5. Time constraints (specific months, years, or date ranges)
+            
+            For ocean regions, use these approximate boundaries:
+            - Indian Ocean: 20°E to 120°E, 30°S to 30°N
+            - Atlantic Ocean: 70°W to 20°E, 60°S to 65°N  
+            - Pacific Ocean: 120°E to 70°W, 60°S to 65°N
+            - Southern Ocean: South of 60°S
+            - Arctic Ocean: North of 65°N
+            
+            Output a detailed plan specifying the exact aggregation strategy.""",
             agent=query_analyst,
-            tools=[*tools],
-            expected_output="Plan listing ocean regions and the exact geolocation info to fetch and from where to fetch the data"
+            tools=schema_tools,
+            expected_output="Detailed analysis of query type, required variables, aggregation level, and geographic/time constraints"
         )
 
         database_query = Task(
             description=(
-                "Use MCP database tools to first inspect the schema, then EXECUTE AGGREGATED QUERIES to reduce volume. "
-                "Return per-cycle aggregates for the requested station: "
-                "Example of query try to use avg because it will reduce the volume of data you need to fetch: SELECT cycle_number AS cycle, AVG(temp) AS temp, AVG(psal) AS psal FROM measurements JOIN profiles ON profiles.profile_id = measurements.profile_id "
-                "WHERE profiles.platform_number = 19005 GROUP BY cycle_number ORDER BY cycle_number; this is only example "
-                "Also return a small sample of distinct latitude/longitude pairs for mapping (e.g., first 3 cycles) and any needed timestamps."
-                "Output must be structured tabular results with clear field names."
+                "Use MCP database tools to first inspect the schema, then EXECUTE AGGREGATED QUERIES based on user request: "
+                "\n1. FOR STATION-SPECIFIC QUERIES: Extract platform_number and aggregate by cycle_number for that station"
+                "\n2. FOR OCEAN-REGION QUERIES: Use latitude/longitude ranges to identify stations in that region, then aggregate by station or overall"
+                "\n3. FOR TIME-BASED QUERIES: Extract month/year from date fields and aggregate accordingly"
+                "\n4. ALWAYS use appropriate aggregation functions: AVG() for measurements, COUNT() for records"
+                "\n\nExample SQL patterns:"
+                "\n- Station-specific: SELECT cycle_number, AVG(temp) as temp, AVG(psal) as psal FROM measurements WHERE platform_number = '2902740' GROUP BY cycle_number"
+                "\n- Ocean-region: SELECT platform_number, AVG(temp) as avg_temp, AVG(psal) as avg_psal FROM measurements WHERE latitude BETWEEN -10 AND 10 AND longitude BETWEEN 50 AND 100 GROUP BY platform_number"
+                "\n- Monthly: SELECT EXTRACT(MONTH FROM date) as month, AVG(temp) as temp FROM measurements WHERE platform_number = '2902740' GROUP BY month"
+                "\n\nReturn structured tabular results with clear field names matching the aggregation level."
             ),
             agent=data_retrieval,
-            expected_output="A concise structured dataset containing all fields needed to satisfy the user's request.",
+            expected_output="Aggregated dataset appropriate for the query type with clear column names matching the requested variables",
             context=[understand_request],
             tools=[*tools]
         )
 
         external_geolocation_search = Task(
-            description="Use SerperDevTool with VERY SPECIFIC queries to fetch precise latitude/longitude for the identified ocean regions. Limit to 1-2 searches. Return exact coordinates only.You must use the tools available to you to get the data you need.",
+            description="Use SerperDevTool with VERY SPECIFIC queries to fetch precise latitude/longitude only if geolocation was requested. Limit to 1-2 searches. Return exact coordinates only.",
             agent=data_retrieval,
-            expected_output="Exact lat/lng for each requested region.You must use the tools available to you to get the data you need.",
+            expected_output="Exact lat/lng for requested regions or station if explicitly asked.",
             context=[understand_request],
             tools=[SerperDevTool()]
         )
 
         result_maker = Task(
             description=(
-                "Generate ONLY the final JSON (no markdown). STRICTLY follow FinalOutputModel and this format: "
-                "report.title, report.content; graphs MUST include: "
-                "1) line 'Temperature Over Cycles' with xKey='cycle', yKey='temp'; "
-                "2) line 'Salinity Over Cycles' with xKey='cycle', yKey='psal'; "
-                "3) scatter 'Temperature vs Salinity' with xKey='temp', yKey='psal'. "
-                "Use aggregated per-cycle averages for lines. Data objects MUST include keys matching xKey/yKey; no empty objects; keep each graph <= 200 points. "
-                "maps should include at least one 'labels' map with lat/lng points for station cycles; optionally include 'hexbin' or 'heatmap'. "
-                "All numbers must be numeric; lat in [-90,90], lng in [-180,180]. Do not add extra keys."
+                "Generate the final JSON following FinalOutputModel strictly. Consider the aggregation level:"
+                "\n- For station-specific queries: Create time series graphs with cycle_number on x-axis"
+                "\n- For ocean-region queries: Create comparison graphs between stations or aggregate maps"
+                "\n- For time-based queries: Use time units (months) on x-axis"
+                "\n\nGraph creation rules:"
+                "\n- Single variable: Line graph with xKey='cycle'/'month'/'station', yKey=[variable]"
+                "\n- Multiple variables: Multiple lines or separate graphs"
+                "\n- Comparison queries: Bar charts or grouped line charts"
+                "\n- Always include all available data points, no truncation"
+                "\n- Maps: Include only if geographic context was requested"
+                "\n- Ensure all numeric values are properly formatted"
+                "\n- For large result sets, focus on key trends rather than every data point"
             ),
             agent=data_analyst,
             context=[understand_request, database_query, external_geolocation_search],
             output_json=FinalOutputModel,
-            expected_output="A single JSON object formatted as per FinalOutputModel with no additional text."
+            expected_output="Well-structured JSON output with appropriate visualizations for the query type"
         )
 
-        crew = Crew(
+
+        # crews for each route
+        convo_crew = Crew(
+            agents=[convo_agent],
+            tasks=[convo_task],
+            process="sequential",
+            max_iter=1,
+            max_execution_time=30,
+            verbose=True
+            )
+        lookup_crew = Crew(
+            agents=[lookup_data_retrieval],
+            tasks=[
+                lookup_database_query,
+                result_maker_lookup
+            ],
+            process="sequential",
+            max_iter=2,
+            max_execution_time=120,
+            verbose=True
+        )
+        report_crew = Crew(
             agents=[query_analyst, data_retrieval, data_analyst],
             tasks=[
                 understand_request,
@@ -206,32 +350,45 @@ def run_crewai_pipeline(query: str, verbose: bool = True) -> Dict[str, Any]:
             verbose=True
         )
 
+
+
+
         input_data = {"query": query}
+        # run the crews from here 
+        router_raw = router_crew.kickoff(input_data)
+        router_raw = str(router_raw)
+        cleaned_output = re.sub(r'```json\s*|\s*```', '', router_raw).strip()
+        cleaned_output = cleaned_output.replace("'", '"')
+        router_result = json.loads(cleaned_output)
+        route = router_result['route']
+        print(f"Router selected route: {route}")
 
-        if verbose:
-            print("🚀 Starting CrewAI execution with simplified 3-agent architecture...")
-            print(f"📊 Available MCP tools: {[tool.name for tool in tools]}")
-            print(f"🔧 Process: Sequential (Gemini compatible)")
-            print(f"🔑 Gemini API Key: {'✅ Set' if os.getenv('GEMINI_API_KEY') else '❌ Missing'}")
-            print("=" * 60)
-
-        result = crew.kickoff(input_data)
-
-        # Parse raw JSON output; strip ```json fences if present
+        result = None
+        if route == "CONVERSATION":
+            result = convo_crew.kickoff(input_data)
+        elif route == "LOOKUP":
+            result = lookup_crew.kickoff(input_data)
+        elif route == "REPORT":
+            result = report_crew.kickoff(input_data)
+        else:
+            # Fallback to LOOKUP if unknown
+            result = lookup_crew.kickoff(input_data)
+        
         if isinstance(result, BaseModel):
-            return result.model_dump()
-        if isinstance(result, dict):
-            return result
-        # Treat as string and sanitize fenced blocks
-        text = str(result)
-        clean_text = re.sub(r"```json\n?|\n?```", "", text).strip()
-        return json.loads(clean_text)
-
+            return result.model_dump()["json_dict"]
+        elif isinstance(result, dict):
+            return result["json_dict"]  
+        else:
+            text = str(result)
+            cleaned = re.sub(r"```json\n?|\n?```", "", text).strip()
+            cleaned_json =  json.loads(cleaned)
+            return cleaned_json["json_dict"]
+        
 
 if __name__ == "__main__":
-    demo_query = "Show me the temperature and salinity data in the indian ocean for the station no. 19005"
+    demo_query = "hii how are you today"
     try:
         output = run_crewai_pipeline(demo_query, verbose=True)
-        print("\n📋 FINAL RESULT:\n", json.dumps(output, indent=2))
+        print("\nFINAL RESULT:\n", json.dumps(output, indent=2))
     except Exception as e:
-        print(f"\n❌ CREW EXECUTION FAILED: {e}")
+        print("\nCREW EXECUTION FAILED:", str(e))

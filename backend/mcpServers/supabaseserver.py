@@ -403,7 +403,20 @@ async def check_sql(sql_query: str) -> str:
     except Exception as e:
         return f"Error checking SQL: {str(e)}"
 
-
+@mcp.tool
+async def get_ocean_region_boundaries() -> str:
+    """
+    Returns approximate latitude/longitude boundaries for major ocean regions.
+    Useful for constraining queries to specific ocean basins.
+    """
+    ocean_boundaries = {
+        "Indian Ocean": {"lat_min": -30, "lat_max": 30, "lon_min": 20, "lon_max": 120},
+        "Atlantic Ocean": {"lat_min": -60, "lat_max": 65, "lon_min": -70, "lon_max": 20},
+        "Pacific Ocean": {"lat_min": -60, "lat_max": 65, "lon_min": 120, "lon_max": -70},
+        "Southern Ocean": {"lat_min": -90, "lat_max": -60, "lon_min": -180, "lon_max": 180},
+        "Arctic Ocean": {"lat_min": 65, "lat_max": 90, "lon_min": -180, "lon_max": 180}
+    }
+    return json.dumps(ocean_boundaries)
         
 
 def main():

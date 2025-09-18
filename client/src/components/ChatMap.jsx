@@ -389,7 +389,7 @@ const ChatMap = () => {
       heatmapPointLat="lat"
       heatmapPointLng="lng"
       heatmapPointWeight="weight"
-      heatmapTopAltitude={0.3}
+      heatmapTopAltitude={0.2}
       heatmapsTransitionDuration={3000}
       enablePointerInteraction={false}
 
