@@ -2,7 +2,8 @@ import { createSlice} from '@reduxjs/toolkit'
 
 
 const initialState = {
-    isChatMapOpen:true,
+    isChatMapOpen:false,
+    selectedMap:null,
 
 }
 
@@ -14,9 +15,12 @@ export const chatMapSlice = createSlice({
             console.log(action.payload)
             state.isChatMapOpen = action.payload
         },
+        setSelectedMap:(state,action)=>{
+            state.selectedMap = action.payload
+        },
     }
 })
 
-export const { setIsChatMapOpen } = chatMapSlice.actions
+export const { setIsChatMapOpen, setSelectedMap } = chatMapSlice.actions
 
 export default chatMapSlice.reducer

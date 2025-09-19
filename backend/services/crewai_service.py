@@ -149,7 +149,7 @@ def run_crewai_pipeline(query: str, verbose: bool = True) -> Dict[str, Any]:
             print(f"Available tools from Stdio MCP server: {[tool.name for tool in tools]}")
 
         # Only allow schema-related tools for the understand step
-        schema_tools = [tool for tool in tools if getattr(tool, "name", "") in ["get_database_schema"]]
+        # schema_tools = [tool for tool in tools if getattr(tool, "name", "") in ["get_database_schema"]]
 
 
         # convo agent and task
@@ -180,7 +180,6 @@ def run_crewai_pipeline(query: str, verbose: bool = True) -> Dict[str, Any]:
             role="Database query Specialist",
             goal="Perform simple database lookups and brief aggregations; return concise values only.",
             backstory="You fetch small, targeted results fast. No graphs or maps unless explicitly asked.",
-            tools=[*tools],
             verbose=True,
             llm=llm,
             max_iter=2
@@ -190,7 +189,7 @@ def run_crewai_pipeline(query: str, verbose: bool = True) -> Dict[str, Any]:
                 "Perform a SIMPLE LOOKUP based on the user's request using MCP DB tools for user query {query}. "
                 "Prefer small aggregates such as COUNT(*), MIN/MAX, AVG by cycle if relevant. "
                 "Return only a tiny result table with clear field names. Do not include graphs or maps."
-                "first get the database schema then check the sql then excute query"
+                "first get the database schema then excute query"
             ),
             agent=lookup_data_retrieval,
             expected_output="Small structured dataset with the requested lookup values.",
@@ -198,28 +197,28 @@ def run_crewai_pipeline(query: str, verbose: bool = True) -> Dict[str, Any]:
         )
         result_maker_lookup = Task(
             description=(
-                    "Return ONLY FinalOutputModel with a short report summarizing fetched values. "
+                    "Return ONLY FinalOutputModel with a 2-3 sentences report summarizing fetched values. "
                     "Unless the user explicitly asked for graphs/maps, set graphs=[] and maps=[]."
             ),
             agent=lookup_data_retrieval,
             context=[lookup_database_query],
             output_json=FinalOutputModel,
-            expected_output="JSON with report filled, graphs and maps likely empty"
+            expected_output="JSON with report filled with 2-3 sentences, graphs and maps likely empty"
         )
 
 
 
 
         # Report-only agents and tasks (heavy analysis)
-        query_analyst = Agent(
-            role="Query Analysis Specialist",
-            goal="Understand user intent,get database schema and decompose complex queries into manageable sub-tasks and produce a concise plan of what geolocation info is needed to make report and generate map and graphs",
-            backstory="You analyze the user's request and output exactly what geolocation (lat/lng of ocean regions like Atlantic or Indian Ocean) is needed and what the final JSON should contain.You are an expert at understanding natural language queries and breaking them down into clear, actionable components. You excel at identifying what information is needed and categorizing the type of request (data analysis, visualization, reporting).",
-            tools=[*tools],
-            verbose=True,
-            llm=llm,
-            max_iter=2
-        )
+        # query_analyst = Agent(
+        #     role="Query Analysis Specialist",
+        #     goal="Understand user intent,get database schema using tools and decompose complex queries into manageable sub-tasks and produce a concise plan of what geolocation info is needed to make report and generate map and graphs",
+        #     backstory="You analyze the user's request and output exactly what geolocation (lat/lng of ocean regions like Atlantic or Indian Ocean) is needed and what the final JSON should contain.You are an expert at understanding natural language queries and breaking them down into clear, actionable components. You excel at identifying what information is needed and categorizing the type of request (data analysis, visualization, reporting).",
+        #     tools=[schema_tools],
+        #     verbose=True,
+        #     llm=llm,
+        #     max_iter=2
+        # )
 
 
         data_retrieval = Agent(

@@ -308,100 +308,100 @@ async def execute_sql(sql_query: str) -> str:
 
 
 
-@mcp.tool
-async def check_sql(sql_query: str) -> str:
-    """
-    Validate a SQL string before execution.
-    - Ensures SELECT-only (blocks DDL/DML keywords)
-    - Checks referenced tables exist in public schema
-    - Hints for quoting reserved identifiers
-    Returns a readable report; does not execute the query.
-    """
-    try:
-        if postgres_conn is None:
-            return "Database not connected. Please connect first."
+# @mcp.tool
+# async def check_sql(sql_query: str) -> str:
+#     """
+#     Validate a SQL string before execution.
+#     - Ensures SELECT-only (blocks DDL/DML keywords)
+#     - Checks referenced tables exist in public schema
+#     - Hints for quoting reserved identifiers
+#     Returns a readable report; does not execute the query.
+#     """
+#     try:
+#         if postgres_conn is None:
+#             return "Database not connected. Please connect first."
         
-        report_lines = []
-        # Sanitize incoming text (strip markdown code fences)
-        def _sanitize(s: str) -> str:
-            s = (s or "").strip()
-            s = re.sub(r"^```\s*sql\s*", "", s, flags=re.IGNORECASE)
-            s = re.sub(r"^```", "", s)
-            s = re.sub(r"```$", "", s)
-            return s.strip()
+#         report_lines = []
+#         # Sanitize incoming text (strip markdown code fences)
+#         def _sanitize(s: str) -> str:
+#             s = (s or "").strip()
+#             s = re.sub(r"^```\s*sql\s*", "", s, flags=re.IGNORECASE)
+#             s = re.sub(r"^```", "", s)
+#             s = re.sub(r"```$", "", s)
+#             return s.strip()
 
-        raw = _sanitize(sql_query)
-        if not raw:
-            return "Error: Empty query."
+#         raw = _sanitize(sql_query)
+#         if not raw:
+#             return "Error: Empty query."
 
-        upper = raw.upper()
-        # Allow SELECT and CTEs (WITH ... SELECT)
-        if not (upper.startswith("SELECT") or upper.startswith("WITH")):
-            return "Blocked: Only SELECT queries (including WITH ... SELECT) are allowed."
+#         upper = raw.upper()
+#         # Allow SELECT and CTEs (WITH ... SELECT)
+#         if not (upper.startswith("SELECT") or upper.startswith("WITH")):
+#             return "Blocked: Only SELECT queries (including WITH ... SELECT) are allowed."
 
-        # Block dangerous keywords anywhere in the query
-        if re.search(r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXEC|EXECUTE|CALL)\b", upper):
-            return "Blocked: Disallowed SQL keyword detected. Only SELECT is permitted."
+#         # Block dangerous keywords anywhere in the query
+#         if re.search(r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXEC|EXECUTE|CALL)\b", upper):
+#             return "Blocked: Disallowed SQL keyword detected. Only SELECT is permitted."
 
-        # Extract table-like identifiers from FROM and JOIN clauses (supports quoted and schema-qualified)
-        table_candidates = set()
-        for pattern in [
-            r"\bFROM\s+(\"?[A-Za-z_][\w]*\"?(?:\.\"?[A-Za-z_][\w]*\"?)?)",
-            r"\bJOIN\s+(\"?[A-Za-z_][\w]*\"?(?:\.\"?[A-Za-z_][\w]*\"?)?)",
-        ]:
-            for m in re.finditer(pattern, raw, flags=re.IGNORECASE):
-                ident = m.group(1).strip()
-                # Remove alias if provided as schema.table alias
-                ident = ident.split()[0]
-                # Strip trailing punctuation
-                ident = ident.rstrip(",)")
-                # If quoted, keep as-is; else lower-case for lookup
-                if ident.startswith('"') and ident.endswith('"'):
-                    clean = ident.strip('"')
-                else:
-                    # If schema qualified, take last part
-                    clean = ident.split('.')[-1]
-                if clean:
-                    table_candidates.add(clean)
+#         # Extract table-like identifiers from FROM and JOIN clauses (supports quoted and schema-qualified)
+#         table_candidates = set()
+#         for pattern in [
+#             r"\bFROM\s+(\"?[A-Za-z_][\w]*\"?(?:\.\"?[A-Za-z_][\w]*\"?)?)",
+#             r"\bJOIN\s+(\"?[A-Za-z_][\w]*\"?(?:\.\"?[A-Za-z_][\w]*\"?)?)",
+#         ]:
+#             for m in re.finditer(pattern, raw, flags=re.IGNORECASE):
+#                 ident = m.group(1).strip()
+#                 # Remove alias if provided as schema.table alias
+#                 ident = ident.split()[0]
+#                 # Strip trailing punctuation
+#                 ident = ident.rstrip(",)")
+#                 # If quoted, keep as-is; else lower-case for lookup
+#                 if ident.startswith('"') and ident.endswith('"'):
+#                     clean = ident.strip('"')
+#                 else:
+#                     # If schema qualified, take last part
+#                     clean = ident.split('.')[-1]
+#                 if clean:
+#                     table_candidates.add(clean)
 
-        cursor = postgres_conn.cursor()
-        try:
-            # Check existence in public schema
-            existing = set()
-            missing = set()
-            for name in sorted(table_candidates):
-                cursor.execute(
-                    """
-                    SELECT 1
-                    FROM information_schema.tables
-                    WHERE table_schema = 'public' AND table_name = %s
-                    """,
-                    (name,)
-                )
-                if cursor.fetchone():
-                    existing.add(name)
-                else:
-                    missing.add(name)
+#         cursor = postgres_conn.cursor()
+#         try:
+#             # Check existence in public schema
+#             existing = set()
+#             missing = set()
+#             for name in sorted(table_candidates):
+#                 cursor.execute(
+#                     """
+#                     SELECT 1
+#                     FROM information_schema.tables
+#                     WHERE table_schema = 'public' AND table_name = %s
+#                     """,
+#                     (name,)
+#                 )
+#                 if cursor.fetchone():
+#                     existing.add(name)
+#                 else:
+#                     missing.add(name)
 
-            report_lines.append("Check: SELECT-only ✓")
-            report_lines.append("Tables referenced: " + (", ".join(sorted(table_candidates)) if table_candidates else "<none detected>"))
-            report_lines.append("Tables found: " + (", ".join(sorted(existing)) if existing else "<none>"))
-            report_lines.append("Tables missing: " + (", ".join(sorted(missing)) if missing else "<none>"))
+#             report_lines.append("Check: SELECT-only ✓")
+#             report_lines.append("Tables referenced: " + (", ".join(sorted(table_candidates)) if table_candidates else "<none detected>"))
+#             report_lines.append("Tables found: " + (", ".join(sorted(existing)) if existing else "<none>"))
+#             report_lines.append("Tables missing: " + (", ".join(sorted(missing)) if missing else "<none>"))
 
-            # Hint for reserved words
-            reserved = {"user", "order", "group", "select", "from"}
-            need_quotes = sorted(t for t in existing if t.lower() in reserved)
-            if need_quotes:
-                report_lines.append("Hint: Quote reserved table names like \"" + "\", \"".join(need_quotes) + "\".")
+#             # Hint for reserved words
+#             reserved = {"user", "order", "group", "select", "from"}
+#             need_quotes = sorted(t for t in existing if t.lower() in reserved)
+#             if need_quotes:
+#                 report_lines.append("Hint: Quote reserved table names like \"" + "\", \"".join(need_quotes) + "\".")
 
-            status = "OK to execute" if not missing else "May fail: missing tables"
-            report_lines.append(f"Status: {status}")
+#             status = "OK to execute" if not missing else "May fail: missing tables"
+#             report_lines.append(f"Status: {status}")
 
-            return "\n".join(report_lines)
-        finally:
-            cursor.close()
-    except Exception as e:
-        return f"Error checking SQL: {str(e)}"
+#             return "\n".join(report_lines)
+#         finally:
+#             cursor.close()
+#     except Exception as e:
+#         return f"Error checking SQL: {str(e)}"
 
 @mcp.tool
 async def get_ocean_region_boundaries() -> str:

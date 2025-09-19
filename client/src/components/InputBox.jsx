@@ -17,13 +17,22 @@ const InputBox = () => {
         dispatch(addMessage({message:input,role:'user'}))
         setSendingMessage(true)
         try{
-            const response = await axiosInstance.post('/ask',{input:input})
+            const response = await axiosInstance.post('/ask',{ query: input })
             console.log(response.data)
-            const graphs = Array.isArray(response.data?.graphs) ? response.data.graphs : []
-            dispatch(addMessage({message:response.data.content,role:'ai',graphs}))
+            const data = response?.data || {}
+            // Normalize AI message shape to { report, graphs, maps, thought }
+            const aiPayload = {
+                role:'ai',
+                report: data.report || null,
+                graphs: Array.isArray(data.graphs) ? data.graphs : [],
+                maps: Array.isArray(data.maps) ? data.maps : [],
+                thought: typeof data.thought === 'string' ? data.thought : undefined,
+            }
+            dispatch(addMessage(aiPayload))
 
         }catch(error){
-            toast.error(error.response.data.message)
+            const msg = error?.response?.data?.error || error?.message || 'Request failed'
+            toast.error(msg)
         }finally{
             setInput('')
             setSendingMessage(false)
