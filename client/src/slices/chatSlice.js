@@ -2,7 +2,8 @@ import { createSlice,nanoid } from '@reduxjs/toolkit'
 
 
 const initialState = {
-    chats:[]
+    chats:[],
+    thought:[]
 
 }
 
@@ -14,6 +15,15 @@ export const chatSlice = createSlice({
             state.chats.push({...action.payload,id:nanoid()})
              
         },
+        connectSocket:(state,action)=>{
+
+        },
+        disconnectSocket:(state,action)=>{
+
+        },
+        subscribeToChat:(state,action)=>{
+            
+        }
     }
 })
 

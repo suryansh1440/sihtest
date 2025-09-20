@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Socket.IO Client Example</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+        .success { background-color: #d4edda; color: #155724; }
+        .error { background-color: #f8d7da; color: #721c24; }
+        .info { background-color: #d1ecf1; color: #0c5460; }
+        .warning { background-color: #fff3cd; color: #856404; }
+        #queryInput {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        #results {
+            margin-top: 20px;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            background-color: #f8f9fa;
+        }
+        pre {
+            background-color: #e9ecef;
+            padding: 10px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Socket.IO CrewAI Client</h1>
+    
+    <div id="status" class="status info">Connecting to server...</div>
+    
+    <div>
+        <input type="text" id="queryInput" placeholder="Enter your query here..." />
+        <button id="analyzeBtn" onclick="analyzeQuery()">Analyze Query</button>
+    </div>
+    
+    <div id="results" style="display: none;">
+        <h3>Analysis Results:</h3>
+        <pre id="resultContent"></pre>
+    </div>
+
+    <script>
+        // Connect to Socket.IO server
+        const socket = io('http://localhost:5000');
+        
+        // Connection status
+        socket.on('connect', function() {
+            updateStatus('Connected to server', 'success');
+        });
+        
+        socket.on('disconnect', function() {
+            updateStatus('Disconnected from server', 'error');
+        });
+        
+        // Status updates
+        socket.on('status', function(data) {
+            updateStatus(data.message, 'info');
+        });
+        
+        // Progress updates
+        socket.on('progress', function(data) {
+            updateStatus(`${data.stage}: ${data.message}`, 'warning');
+        });
+        
+        // Analysis complete
+        socket.on('analysis_complete', function(data) {
+            updateStatus('Analysis completed!', 'success');
+            displayResults(data.result);
+        });
+        
+        // Error handling
+        socket.on('error', function(data) {
+            updateStatus(`Error: ${data.message}`, 'error');
+        });
+        
+        function updateStatus(message, type) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${type}`;
+        }
+        
+        function analyzeQuery() {
+            const query = document.getElementById('queryInput').value.trim();
+            const analyzeBtn = document.getElementById('analyzeBtn');
+            
+            if (!query) {
+                updateStatus('Please enter a query', 'error');
+                return;
+            }
+            
+            // Disable button during analysis
+            analyzeBtn.disabled = true;
+            analyzeBtn.textContent = 'Analyzing...';
+            
+            // Hide previous results
+            document.getElementById('results').style.display = 'none';
+            
+            // Emit the query
+            socket.emit('analyze_query', { query: query });
+        }
+        
+        function displayResults(result) {
+            const resultsDiv = document.getElementById('results');
+            const resultContent = document.getElementById('resultContent');
+            
+            resultContent.textContent = JSON.stringify(result, null, 2);
+            resultsDiv.style.display = 'block';
+            
+            // Re-enable button
+            document.getElementById('analyzeBtn').disabled = false;
+            document.getElementById('analyzeBtn').textContent = 'Analyze Query';
+        }
+        
+        // Allow Enter key to trigger analysis
+        document.getElementById('queryInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                analyzeQuery();
+            }
+        });
+    </script>
+</body>
+</html>
